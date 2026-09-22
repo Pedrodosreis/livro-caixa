@@ -189,6 +189,8 @@
   }
   .value.positive { color: var(--teal); }
   .value.negative { color: var(--rust); }
+  .value.gold { color: var(--gold); }
+  .value.neutral { color: var(--muted); }
 
   main {
     flex: 1;
@@ -340,6 +342,48 @@
   .monthly-table td.positive { color: var(--teal); }
   .monthly-table td.negative { color: var(--rust); }
   .monthly-table td.neutral { color: var(--muted); }
+
+  .detail-table.monthly-table thead th,
+  .detail-table.monthly-table td { text-align: left; }
+  .detail-table.monthly-table thead th:last-child,
+  .detail-table.monthly-table td:last-child { text-align: right; }
+  .detail-table .diario-row td { font-style: italic; color: var(--clay); }
+
+  .detail-nav-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--rule);
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .detail-nav-row .year-label { min-width: 190px; font-size: 19px; text-transform: capitalize; }
+  .detail-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 14px;
+  }
+  .detail-chip {
+    flex: 1 1 130px;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 9px 12px;
+  }
+  .detail-chip .label {
+    display: block;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 2px;
+  }
+  .detail-chip .value {
+    display: block;
+    font-size: 15px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
 
   .hint {
     margin: 10px 2px 0;
@@ -680,6 +724,7 @@
   <div class="view-tabs">
     <button class="view-tab active" id="tabGeral" data-view="geral">Visão geral</button>
     <button class="view-tab" id="tabMensal" data-view="mensal">Visão mensal</button>
+    <button class="view-tab" id="tabDetalhado" data-view="detalhado">Detalhado</button>
   </div>
   <div class="header-bottom">
     <div class="year-nav">
@@ -700,6 +745,17 @@
   </div>
   <div class="grid-wrap" id="mensalWrap" style="display:none;">
     <table class="monthly-table" id="monthlyTable"></table>
+  </div>
+  <div class="grid-wrap" id="detalhadoWrap" style="display:none;">
+    <div class="detail-nav-row">
+      <div class="year-nav">
+        <button id="prevMonthDetail" aria-label="Mês anterior">‹</button>
+        <span class="year-label serif" id="detailMonthLabel">—</span>
+        <button id="nextMonthDetail" aria-label="Próximo mês">›</button>
+      </div>
+    </div>
+    <table class="monthly-table detail-table" id="detailTable"></table>
+    <div class="detail-summary" id="detailSummary"></div>
   </div>
   <p class="hint" id="viewHint">Toque em um dia para lançar uma entrada, uma saída ou mover valor para a reserva.</p>
   <div class="data-actions">
@@ -761,6 +817,7 @@
 
   var state = {
     year: todayObj.getFullYear(),
+    detailMonth: todayObj.getMonth(),
     transactions: [],
     reserveAdjustments: [],
     diarios: []
@@ -978,17 +1035,14 @@
     return total;
   }
 
-  var TYPE_ORDER = ["entrada", "saida", "diario", "economia"];
+  var TYPE_ORDER = ["entrada", "saida", "economia"];
 
   function dayTypesPresent(dateStr) {
     var present = {};
     for (var i = 0; i < state.transactions.length; i++) {
-      if (state.transactions[i].date === dateStr) present[state.transactions[i].type] = true;
-    }
-    if (dateStr >= todayStr) {
-      for (var j = 0; j < state.diarios.length; j++) {
-        if (diarioAppliesOnDay(state.diarios[j], dateStr)) present["diario"] = true;
-      }
+      var txType = state.transactions[i].type;
+      if (txType === "diario") continue;
+      if (state.transactions[i].date === dateStr) present[txType] = true;
     }
     return TYPE_ORDER.filter(function (ty) { return present[ty]; });
   }
@@ -1015,8 +1069,10 @@
 
     if (currentView === "geral") {
       renderGrid();
-    } else {
+    } else if (currentView === "mensal") {
       renderMonthlyView();
+    } else if (currentView === "detalhado") {
+      renderDetailView();
     }
   }
 
@@ -1043,6 +1099,50 @@
     return { entrada: entrada, saidaPix: saidaPix, saidaCredito: saidaCredito, economia: economia, saldo: saldo };
   }
 
+  function buildDetailRows(year, monthIdx) {
+    var rows = [];
+    for (var i = 0; i < state.transactions.length; i++) {
+      var t = state.transactions[i];
+      var p = t.date.split("-").map(Number);
+      if (p[0] === year && (p[1] - 1) === monthIdx) {
+        rows.push({
+          date: t.date,
+          type: t.type,
+          description: t.description,
+          paymentMethod: t.paymentMethod,
+          value: t.value,
+          isVirtual: false
+        });
+      }
+    }
+    var dim = daysInMonth(year, monthIdx);
+    for (var j = 0; j < state.diarios.length; j++) {
+      var tpl = state.diarios[j];
+      var total = 0, days = 0, firstKey = null;
+      for (var day = 1; day <= dim; day++) {
+        var key = fmtKey(year, monthIdx, day);
+        if (diarioAppliesOnDay(tpl, key)) {
+          total += tpl.value;
+          days++;
+          if (!firstKey) firstKey = key;
+        }
+      }
+      if (days > 0) {
+        rows.push({
+          date: firstKey,
+          type: "diario",
+          description: tpl.description,
+          paymentMethod: null,
+          value: total,
+          isVirtual: true,
+          days: days
+        });
+      }
+    }
+    rows.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+    return rows;
+  }
+
   function renderMonthlyView() {
     var rows = "";
     for (var m = 0; m < 12; m++) {
@@ -1060,6 +1160,58 @@
     document.getElementById("monthlyTable").innerHTML =
       "<thead><tr><th>Mês</th><th>Entradas</th><th>Saída (Pix)</th><th>Saída (Crédito)</th><th>Economia</th><th>Saldo do mês</th></tr></thead>" +
       "<tbody>" + rows + "</tbody>";
+  }
+
+  function renderDetailView() {
+    var label = document.getElementById("detailMonthLabel");
+    if (label) label.textContent = MONTH_FULL[state.detailMonth] + " de " + state.year;
+
+    var rows = buildDetailRows(state.year, state.detailMonth);
+    var tot = monthTotals(state.year, state.detailMonth);
+    var labelMap = { entrada: "Entrada", saida: "Saída", economia: "Economia", diario: "Diário" };
+
+    var bodyHtml = rows.map(function (r) {
+      var dateText = r.isVirtual
+        ? ("recorrente · " + r.days + " dia" + (r.days > 1 ? "s" : ""))
+        : formatShortDate(r.date);
+      var descText = r.description ? escapeHtml(r.description) : "<span style='color:var(--muted)'>—</span>";
+      var pmText = r.paymentMethod === "credito" ? "Crédito" : r.paymentMethod === "pix" ? "Pix" : "—";
+      var amtClass = r.type === "entrada" ? "entrada-amt" : r.type === "economia" ? "economia-amt" : "saida-amt";
+      var rowClass = r.type === "diario" ? " class='diario-row'" : "";
+      return "<tr" + rowClass + ">" +
+        "<td class='month-name'>" + dateText + "</td>" +
+        "<td>" + labelMap[r.type] + "</td>" +
+        "<td>" + descText + "</td>" +
+        "<td>" + pmText + "</td>" +
+        "<td class='" + amtClass + "'>" + currency(r.value) + "</td>" +
+        "</tr>";
+    }).join("");
+
+    if (!rows.length) {
+      bodyHtml = "<tr><td colspan='5' style='text-align:center;color:var(--muted);padding:16px;'>Nenhuma movimentação neste mês.</td></tr>";
+    }
+
+    document.getElementById("detailTable").innerHTML =
+      "<thead><tr><th>Dia</th><th>Tipo</th><th>Descrição</th><th>Forma de pagamento</th><th>Valor</th></tr></thead>" +
+      "<tbody>" + bodyHtml + "</tbody>";
+
+    var saldoCls = tot.saldo > 0 ? "positive" : tot.saldo < 0 ? "negative" : "neutral";
+    function chip(labelTxt, val, cls) {
+      return "<div class='detail-chip'><span class='label'>" + labelTxt + "</span><span class='value " + cls + "'>" + currency(val) + "</span></div>";
+    }
+    document.getElementById("detailSummary").innerHTML =
+      chip("Entradas", tot.entrada, "positive") +
+      chip("Saídas (Pix)", tot.saidaPix, "negative") +
+      chip("Saídas (Crédito)", tot.saidaCredito, "negative") +
+      chip("Economia", tot.economia, "gold") +
+      chip("Saldo do mês", tot.saldo, saldoCls);
+  }
+
+  function changeDetailMonth(delta) {
+    state.detailMonth += delta;
+    if (state.detailMonth < 0) { state.detailMonth = 11; state.year -= 1; }
+    else if (state.detailMonth > 11) { state.detailMonth = 0; state.year += 1; }
+    render();
   }
 
   function renderGrid() {
@@ -1718,10 +1870,17 @@
     state.year += 1;
     render();
   });
+  document.getElementById("prevMonthDetail").addEventListener("click", function () {
+    changeDetailMonth(-1);
+  });
+  document.getElementById("nextMonthDetail").addEventListener("click", function () {
+    changeDetailMonth(1);
+  });
 
   var viewTabs = document.querySelectorAll(".view-tab");
   var geralWrap = document.getElementById("geralWrap");
   var mensalWrap = document.getElementById("mensalWrap");
+  var detalhadoWrap = document.getElementById("detalhadoWrap");
   var viewHint = document.getElementById("viewHint");
   for (var vt = 0; vt < viewTabs.length; vt++) {
     viewTabs[vt].addEventListener("click", function () {
@@ -1730,6 +1889,7 @@
       this.classList.add("active");
       geralWrap.style.display = currentView === "geral" ? "" : "none";
       mensalWrap.style.display = currentView === "mensal" ? "" : "none";
+      detalhadoWrap.style.display = currentView === "detalhado" ? "" : "none";
       viewHint.style.display = currentView === "geral" ? "" : "none";
       render();
     });
