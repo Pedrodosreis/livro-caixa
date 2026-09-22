@@ -669,13 +669,14 @@
   <div class="header-top">
     <div class="brand">
       <h1>Livro-Caixa</h1>
-      <p>Seu saldo, dia a dia, guardado só neste navegador</p>
+      <p>Seu saldo, dia a dia, sincronizado com seu banco de dados</p>
     </div>
     <div class="reserve-pill" id="reservePill" role="button" tabindex="0">
       <span class="label">Reserva de emergência</span>
       <span class="value" id="reserveValue">R$ 0,00</span>
     </div>
   </div>
+  <p class="hint" id="loadingBanner" style="display:none; margin-top:10px;">Carregando dados do Supabase…</p>
   <div class="view-tabs">
     <button class="view-tab active" id="tabGeral" data-view="geral">Visão geral</button>
     <button class="view-tab" id="tabMensal" data-view="mensal">Visão mensal</button>
@@ -742,11 +743,15 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
 (function () {
   "use strict";
 
-  var STORAGE_KEY = "livro-caixa:transacoes:v1";
+  var SUPABASE_URL = "https://clghmeitpglsccdomjgg.supabase.co";
+  var SUPABASE_KEY = "b_publishable_CK1xpP81tahc5Xkt5xSpig_g-515fKG";
+  var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
   var MONTHS = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
   var MONTH_FULL = ["janeiro","fevereiro","março","abril","maio","junho","julho","agosto","setembro","outubro","novembro","dezembro"];
   var INDEFINITE_MONTHS = 360; // "a perder de vista": materializa 30 anos, removível a qualquer momento
@@ -760,42 +765,96 @@
     reserveAdjustments: [],
     diarios: []
   };
-  var loaded = loadState();
-  state.transactions = loaded.transactions;
-  state.reserveAdjustments = loaded.reserveAdjustments;
-  state.diarios = loaded.diarios;
 
   var sortedDates = [];
   var cumMap = {};
   var dailyDelta = {};
   var reserveTotal = 0;
 
-  function loadState() {
-    try {
-      var raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return { transactions: [], reserveAdjustments: [], diarios: [] };
-      var parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return { transactions: parsed, reserveAdjustments: [], diarios: [] };
-      return {
-        transactions: Array.isArray(parsed.transactions) ? parsed.transactions : [],
-        reserveAdjustments: Array.isArray(parsed.reserveAdjustments) ? parsed.reserveAdjustments : [],
-        diarios: Array.isArray(parsed.diarios) ? parsed.diarios : []
-      };
-    } catch (e) {
-      return { transactions: [], reserveAdjustments: [], diarios: [] };
-    }
+  function dbError(context, err) {
+    console.error(context, err);
+    window.alert("Erro ao falar com o Supabase (" + context + "): " + (err && err.message ? err.message : "verifique a URL, a chave e se as tabelas existem.") + "\n\nDica: se a tabela tiver Row Level Security (RLS) ativado, crie uma policy permitindo acesso, ou desative o RLS nela.");
   }
 
-  function saveState() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        transactions: state.transactions,
-        reserveAdjustments: state.reserveAdjustments,
-        diarios: state.diarios
-      }));
-    } catch (e) {
-      /* storage unavailable — continue in-memory only */
-    }
+  function rowToTransaction(r) {
+    return {
+      id: String(r.id),
+      type: r.type,
+      value: Number(r.value),
+      date: r.date,
+      description: r.description || "",
+      recurring: !!r.recurring,
+      recurGroup: r.recur_group || null,
+      indefinite: !!r.indefinite,
+      paymentMethod: r.payment_method || null
+    };
+  }
+  function transactionToRow(t) {
+    return {
+      type: t.type,
+      value: t.value,
+      date: t.date,
+      description: t.description || null,
+      recurring: !!t.recurring,
+      recur_group: t.recurGroup || null,
+      indefinite: !!t.indefinite,
+      payment_method: t.paymentMethod || null
+    };
+  }
+  function rowToReserveAdj(r) {
+    return {
+      id: String(r.id),
+      type: r.type,
+      value: Number(r.value),
+      date: r.date,
+      description: r.description || "",
+      linkedTransactionId: r.linked_transaction_id != null ? String(r.linked_transaction_id) : null
+    };
+  }
+  function reserveAdjToRow(a) {
+    return {
+      type: a.type,
+      value: a.value,
+      date: a.date,
+      description: a.description || null,
+      linked_transaction_id: a.linkedTransactionId ? Number(a.linkedTransactionId) : null
+    };
+  }
+  function rowToDiario(r) {
+    return {
+      id: String(r.id),
+      value: Number(r.value),
+      description: r.description || "",
+      startDate: r.start_date,
+      endDate: r.end_date,
+      indefinite: !!r.indefinite
+    };
+  }
+  function diarioToRow(d) {
+    return {
+      value: d.value,
+      description: d.description || null,
+      start_date: d.startDate,
+      end_date: d.endDate,
+      indefinite: !!d.indefinite
+    };
+  }
+
+  async function loadFromDB() {
+    var txRes = await sb.from("transactions").select("*").order("date", { ascending: true });
+    if (txRes.error) throw txRes.error;
+    var raRes = await sb.from("reserve_adjustments").select("*").order("date", { ascending: true });
+    if (raRes.error) throw raRes.error;
+    var diRes = await sb.from("diarios").select("*");
+    if (diRes.error) throw diRes.error;
+    state.transactions = (txRes.data || []).map(rowToTransaction);
+    state.reserveAdjustments = (raRes.data || []).map(rowToReserveAdj);
+    state.diarios = (diRes.data || []).map(rowToDiario);
+  }
+
+  function setLoading(on) {
+    var el = document.getElementById("loadingBanner");
+    if (el) el.style.display = on ? "" : "none";
   }
 
   function escapeHtml(str) {
@@ -1067,8 +1126,12 @@
     overlay.classList.add("open");
   }
 
-  function afterDataChange() {
-    saveState();
+  async function afterDataChange() {
+    try {
+      await loadFromDB();
+    } catch (e) {
+      dbError("recarregar dados", e);
+    }
     refreshModalBody();
     renderGrid();
     render();
@@ -1211,7 +1274,7 @@
 
     var editSaveBtn = document.getElementById("editSaveBtn");
     if (editSaveBtn) {
-      editSaveBtn.addEventListener("click", function () {
+      editSaveBtn.addEventListener("click", async function () {
         var id = editingTxId;
         var target = null;
         for (var idx = 0; idx < state.transactions.length; idx++) {
@@ -1252,17 +1315,18 @@
 
         var originalDate = target.date, originalType = target.type, originalGroup = target.recurGroup;
 
-        state.transactions = state.transactions.filter(function (tx) {
-          if (originalGroup) {
-            if (tx.recurGroup !== originalGroup) return true;
-            return tx.date < originalDate;
-          }
-          return String(tx.id) !== String(id);
-        });
+        var delRes;
+        if (originalGroup) {
+          delRes = await sb.from("transactions").delete().eq("recur_group", originalGroup).gte("date", originalDate);
+        } else {
+          delRes = await sb.from("transactions").delete().eq("id", Number(id));
+        }
+        if (delRes.error) { dbError("editar lançamento", delRes.error); return; }
 
         var newGroupId = isRecurringNew ? (Date.now() + "-" + Math.random().toString(36).slice(2, 8)) : null;
         var parts = originalDate.split("-").map(Number);
         var startYear = parts[0], startMonthIdx = parts[1] - 1, startDay = parts[2];
+        var rows = [];
         for (var i = 0; i < months; i++) {
           var targetMonthIdx = startMonthIdx + i;
           var targetYear = startYear + Math.floor(targetMonthIdx / 12);
@@ -1271,8 +1335,7 @@
           var targetDay = Math.min(startDay, dim);
           var key = fmtKey(targetYear, normMonthIdx, targetDay);
           if (paymentMethod === "credito") key = creditBillDate(key);
-          state.transactions.push({
-            id: Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "-" + i,
+          rows.push(transactionToRow({
             type: originalType,
             value: Math.round(value * 100) / 100,
             date: key,
@@ -1281,11 +1344,13 @@
             recurGroup: newGroupId,
             paymentMethod: paymentMethod,
             indefinite: isIndefinite
-          });
+          }));
         }
+        var insRes = await sb.from("transactions").insert(rows);
+        if (insRes.error) { dbError("editar lançamento", insRes.error); return; }
 
         editingTxId = null;
-        afterDataChange();
+        await afterDataChange();
       });
       document.getElementById("editCancelBtn").addEventListener("click", function () {
         editingTxId = null;
@@ -1295,29 +1360,27 @@
 
     var confirmBtns = movsList.querySelectorAll("[data-action]");
     for (var m = 0; m < confirmBtns.length; m++) {
-      confirmBtns[m].addEventListener("click", function () {
+      confirmBtns[m].addEventListener("click", async function () {
         var action = this.getAttribute("data-action");
         var id = deletingTxId;
         deletingTxId = null;
         if (action === "cancel") { refreshModalBody(); return; }
+        var res;
         if (action === "only") {
-          state.transactions = state.transactions.filter(function (t) { return String(t.id) !== String(id); });
+          res = await sb.from("transactions").delete().eq("id", Number(id));
         } else if (action === "future") {
           var target = null;
           for (var n = 0; n < state.transactions.length; n++) {
             if (String(state.transactions[n].id) === String(id)) { target = state.transactions[n]; break; }
           }
           if (target && target.recurGroup) {
-            var grp = target.recurGroup, fromDate = target.date;
-            state.transactions = state.transactions.filter(function (t) {
-              if (t.recurGroup !== grp) return true;
-              return t.date < fromDate;
-            });
+            res = await sb.from("transactions").delete().eq("recur_group", target.recurGroup).gte("date", target.date);
           } else {
-            state.transactions = state.transactions.filter(function (t) { return String(t.id) !== String(id); });
+            res = await sb.from("transactions").delete().eq("id", Number(id));
           }
         }
-        afterDataChange();
+        if (res && res.error) { dbError("excluir lançamento", res.error); return; }
+        await afterDataChange();
       });
     }
   }
@@ -1351,7 +1414,7 @@
 
     var diarioEditSaveBtn = document.getElementById("diarioEditSaveBtn");
     if (diarioEditSaveBtn) {
-      diarioEditSaveBtn.addEventListener("click", function () {
+      diarioEditSaveBtn.addEventListener("click", async function () {
         var tpl = null;
         for (var k = 0; k < state.diarios.length; k++) {
           if (String(state.diarios[k].id) === String(editingDiarioId)) { tpl = state.diarios[k]; break; }
@@ -1362,21 +1425,29 @@
         var raw = valInput.value.trim().replace(/\./g, "").replace(",", ".");
         var value = parseFloat(raw);
         if (!value || value <= 0 || isNaN(value)) { valInput.focus(); return; }
-        tpl.value = Math.round(value * 100) / 100;
-        tpl.description = descInput.value.trim();
+        var newValue = Math.round(value * 100) / 100;
+        var newDescription = descInput.value.trim();
         var indefCheck = document.getElementById("diarioEditIndefiniteCheck");
-        tpl.indefinite = !!(indefCheck && indefCheck.checked);
-        if (tpl.indefinite) {
-          tpl.endDate = null;
+        var newIndefinite = !!(indefCheck && indefCheck.checked);
+        var newEndDate;
+        if (newIndefinite) {
+          newEndDate = null;
         } else {
           var monthsInput = document.getElementById("diarioEditMonthsInput");
           var months = parseInt(monthsInput.value, 10);
           if (!months || months < 1) months = 1;
           if (months > 60) months = 60;
-          tpl.endDate = addMonthsToKey(tpl.startDate, months);
+          newEndDate = addMonthsToKey(tpl.startDate, months);
         }
+        var res = await sb.from("diarios").update({
+          value: newValue,
+          description: newDescription || null,
+          indefinite: newIndefinite,
+          end_date: newEndDate
+        }).eq("id", Number(editingDiarioId));
+        if (res.error) { dbError("editar diário", res.error); return; }
         editingDiarioId = null;
-        afterDataChange();
+        await afterDataChange();
       });
       document.getElementById("diarioEditCancelBtn").addEventListener("click", function () {
         editingDiarioId = null;
@@ -1386,13 +1457,14 @@
 
     var diarioConfirmBtns = movsList.querySelectorAll("[data-diario-action]");
     for (var m = 0; m < diarioConfirmBtns.length; m++) {
-      diarioConfirmBtns[m].addEventListener("click", function () {
+      diarioConfirmBtns[m].addEventListener("click", async function () {
         var action = this.getAttribute("data-diario-action");
         var id = deletingDiarioId;
         deletingDiarioId = null;
         if (action === "remove") {
-          state.diarios = state.diarios.filter(function (d) { return String(d.id) !== String(id); });
-          afterDataChange();
+          var res = await sb.from("diarios").delete().eq("id", Number(id));
+          if (res.error) { dbError("remover diário", res.error); return; }
+          await afterDataChange();
         } else {
           refreshModalBody();
         }
@@ -1470,7 +1542,7 @@
     input.focus();
   }
 
-  function submitForm(type) {
+  async function submitForm(type) {
     var input = document.getElementById("valueInput");
     var raw = input.value.trim().replace(/\./g, "").replace(",", ".");
     var value = parseFloat(raw);
@@ -1510,6 +1582,7 @@
     var startYear = parts[0], startMonthIdx = parts[1] - 1, startDay = parts[2];
     var groupId = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
 
+    var rows = [];
     for (var i = 0; i < months; i++) {
       var targetMonthIdx = startMonthIdx + i;
       var targetYear = startYear + Math.floor(targetMonthIdx / 12);
@@ -1518,8 +1591,7 @@
       var targetDay = Math.min(startDay, dim);
       var key = fmtKey(targetYear, normMonthIdx, targetDay);
       if (paymentMethod === "credito") key = creditBillDate(key);
-      state.transactions.push({
-        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "-" + i,
+      rows.push(transactionToRow({
         type: type,
         value: Math.round(value * 100) / 100,
         date: key,
@@ -1528,14 +1600,14 @@
         recurGroup: isRecurring ? groupId : null,
         indefinite: isIndefinite,
         paymentMethod: paymentMethod
-      });
+      }));
     }
 
-    saveState();
+    var res = await sb.from("transactions").insert(rows);
+    if (res.error) { dbError("salvar lançamento", res.error); return; }
+
     resetActions();
-    refreshModalBody();
-    renderGrid();
-    render();
+    await afterDataChange();
   }
 
   function showDiarioForm() {
@@ -1576,7 +1648,7 @@
     input.focus();
   }
 
-  function submitDiarioForm() {
+  async function submitDiarioForm() {
     var input = document.getElementById("valueInput");
     var raw = input.value.trim().replace(/\./g, "").replace(",", ".");
     var value = parseFloat(raw);
@@ -1590,16 +1662,17 @@
     var isFuture = currentDate >= todayStr;
 
     if (!isFuture) {
-      state.transactions.push({
-        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      var res = await sb.from("transactions").insert([transactionToRow({
         type: "diario",
         value: Math.round(value * 100) / 100,
         date: currentDate,
         description: description,
         recurring: false,
         recurGroup: null,
-        indefinite: false
-      });
+        indefinite: false,
+        paymentMethod: null
+      })]);
+      if (res.error) { dbError("salvar diário", res.error); return; }
     } else {
       var indefiniteCheck = document.getElementById("indefiniteCheck");
       var isIndefinite = !!(indefiniteCheck && indefiniteCheck.checked);
@@ -1611,21 +1684,18 @@
         if (months > 60) months = 60;
         endDate = addMonthsToKey(currentDate, months);
       }
-      state.diarios.push({
-        id: Date.now() + "-" + Math.random().toString(36).slice(2, 8),
+      var dres = await sb.from("diarios").insert([diarioToRow({
         value: Math.round(value * 100) / 100,
         description: description,
         startDate: currentDate,
         endDate: endDate,
         indefinite: isIndefinite
-      });
+      })]);
+      if (dres.error) { dbError("salvar diário", dres.error); return; }
     }
 
-    saveState();
     resetActions();
-    refreshModalBody();
-    renderGrid();
-    render();
+    await afterDataChange();
   }
 
   document.getElementById("closeModal").addEventListener("click", closeModal);
@@ -1712,17 +1782,19 @@
     }).join("");
     var delBtns = reserveMovsList.querySelectorAll(".del");
     for (var i = 0; i < delBtns.length; i++) {
-      delBtns[i].addEventListener("click", function () {
+      delBtns[i].addEventListener("click", async function () {
         var id = this.getAttribute("data-id");
         var adj = null;
         for (var j = 0; j < state.reserveAdjustments.length; j++) {
           if (String(state.reserveAdjustments[j].id) === id) { adj = state.reserveAdjustments[j]; break; }
         }
-        state.reserveAdjustments = state.reserveAdjustments.filter(function (a) { return String(a.id) !== id; });
         if (adj && adj.linkedTransactionId) {
-          state.transactions = state.transactions.filter(function (t) { return String(t.id) !== String(adj.linkedTransactionId); });
+          var txDel = await sb.from("transactions").delete().eq("id", Number(adj.linkedTransactionId));
+          if (txDel.error) { dbError("remover retirada", txDel.error); return; }
         }
-        saveState();
+        var res = await sb.from("reserve_adjustments").delete().eq("id", Number(id));
+        if (res.error) { dbError("remover ajuste da reserva", res.error); return; }
+        try { await loadFromDB(); } catch (e) { dbError("recarregar dados", e); }
         refreshReserveModal();
         render();
       });
@@ -1760,7 +1832,7 @@
     inp.focus();
   }
 
-  function submitReserveForm(rtype) {
+  async function submitReserveForm(rtype) {
     var input = document.getElementById("reserveValueInput");
     var raw = input.value.trim().replace(/\./g, "").replace(",", ".");
     var value = parseFloat(raw);
@@ -1771,50 +1843,54 @@
     }
     var descInput = document.getElementById("reserveDescInput");
     var description = descInput ? descInput.value.trim() : "";
-    var adjId = Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    var roundedValue = Math.round(value * 100) / 100;
 
     if (rtype === "retirada") {
-      var txId = Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "-tx";
-      state.transactions.push({
-        id: txId,
+      var txRes = await sb.from("transactions").insert([transactionToRow({
         type: "entrada",
-        value: Math.round(value * 100) / 100,
+        value: roundedValue,
         date: todayStr,
         description: description || "Retirada da reserva",
         recurring: false,
-        recurGroup: null
-      });
-      state.reserveAdjustments.push({
-        id: adjId,
+        recurGroup: null,
+        indefinite: false,
+        paymentMethod: null
+      })]).select();
+      if (txRes.error) { dbError("registrar retirada", txRes.error); return; }
+      var newTxId = txRes.data && txRes.data[0] && txRes.data[0].id;
+      var adjRes = await sb.from("reserve_adjustments").insert([reserveAdjToRow({
         type: "retirada",
-        value: Math.round(value * 100) / 100,
+        value: roundedValue,
         date: todayStr,
         description: description,
-        linkedTransactionId: txId
-      });
+        linkedTransactionId: newTxId != null ? String(newTxId) : null
+      })]);
+      if (adjRes.error) { dbError("registrar retirada", adjRes.error); return; }
     } else {
-      state.reserveAdjustments.push({
-        id: adjId,
+      var res = await sb.from("reserve_adjustments").insert([reserveAdjToRow({
         type: "rendimento",
-        value: Math.round(value * 100) / 100,
+        value: roundedValue,
         date: todayStr,
-        description: description
-      });
+        description: description,
+        linkedTransactionId: null
+      })]);
+      if (res.error) { dbError("registrar rendimento", res.error); return; }
     }
 
-    saveState();
     resetReserveActions();
+    try { await loadFromDB(); } catch (e) { dbError("recarregar dados", e); }
     refreshReserveModal();
     render();
   }
 
-  document.getElementById("resetAllBtn").addEventListener("click", function () {
-    var ok = window.confirm("Isso vai apagar todos os lançamentos e a reserva de emergência. Não é possível desfazer. Deseja continuar?");
+  document.getElementById("resetAllBtn").addEventListener("click", async function () {
+    var ok = window.confirm("Isso vai apagar todos os lançamentos e a reserva de emergência no banco de dados. Não é possível desfazer. Deseja continuar?");
     if (!ok) return;
-    state.transactions = [];
-    state.reserveAdjustments = [];
-    state.diarios = [];
-    saveState();
+    var r1 = await sb.from("transactions").delete().neq("id", 0);
+    var r2 = await sb.from("reserve_adjustments").delete().neq("id", 0);
+    var r3 = await sb.from("diarios").delete().neq("id", 0);
+    if (r1.error || r2.error || r3.error) { dbError("zerar planilha", r1.error || r2.error || r3.error); return; }
+    try { await loadFromDB(); } catch (e) { dbError("recarregar dados", e); }
     render();
   });
 
@@ -1847,7 +1923,7 @@
     var file = importFileInput.files && importFileInput.files[0];
     if (!file) return;
     var reader = new FileReader();
-    reader.onload = function () {
+    reader.onload = async function () {
       var parsed;
       try {
         parsed = JSON.parse(String(reader.result));
@@ -1863,20 +1939,45 @@
       var hasCurrentData = state.transactions.length > 0 || state.reserveAdjustments.length > 0 || state.diarios.length > 0;
       var replace = true;
       if (hasCurrentData) {
-        replace = window.confirm("Substituir os dados atuais pelos do arquivo importado? Clique em Cancelar para mesclar (somar) com o que já está aqui.");
+        replace = window.confirm("Substituir os dados atuais no banco pelos do arquivo importado? Clique em Cancelar para mesclar (adicionar) ao que já está no banco.");
       }
-      if (replace) {
-        state.transactions = incoming.transactions;
-        state.reserveAdjustments = incoming.reserveAdjustments;
-        state.diarios = incoming.diarios;
-      } else {
-        state.transactions = state.transactions.concat(incoming.transactions);
-        state.reserveAdjustments = state.reserveAdjustments.concat(incoming.reserveAdjustments);
-        state.diarios = state.diarios.concat(incoming.diarios);
+      try {
+        if (replace) {
+          await sb.from("transactions").delete().neq("id", 0);
+          await sb.from("reserve_adjustments").delete().neq("id", 0);
+          await sb.from("diarios").delete().neq("id", 0);
+        }
+        var idMap = {};
+        if (incoming.transactions.length) {
+          var txRows = incoming.transactions.map(transactionToRow);
+          var txRes = await sb.from("transactions").insert(txRows).select();
+          if (txRes.error) throw txRes.error;
+          for (var i = 0; i < incoming.transactions.length; i++) {
+            var oldId = incoming.transactions[i].id;
+            var newRow = txRes.data && txRes.data[i];
+            if (oldId != null && newRow) idMap[String(oldId)] = newRow.id;
+          }
+        }
+        if (incoming.diarios.length) {
+          var diRes = await sb.from("diarios").insert(incoming.diarios.map(diarioToRow));
+          if (diRes.error) throw diRes.error;
+        }
+        if (incoming.reserveAdjustments.length) {
+          var raRows = incoming.reserveAdjustments.map(function (a) {
+            var row = reserveAdjToRow(a);
+            row.linked_transaction_id = (a.linkedTransactionId != null && idMap[String(a.linkedTransactionId)] != null)
+              ? idMap[String(a.linkedTransactionId)] : null;
+            return row;
+          });
+          var raRes = await sb.from("reserve_adjustments").insert(raRows);
+          if (raRes.error) throw raRes.error;
+        }
+        await loadFromDB();
+        render();
+        window.alert("Dados importados com sucesso.");
+      } catch (e) {
+        dbError("importar dados", e);
       }
-      saveState();
-      render();
-      window.alert("Dados importados com sucesso.");
     };
     reader.onerror = function () {
       window.alert("Não foi possível ler esse arquivo.");
@@ -1884,7 +1985,17 @@
     reader.readAsText(file);
   });
 
-  render();
+  init();
+  async function init() {
+    setLoading(true);
+    try {
+      await loadFromDB();
+    } catch (e) {
+      dbError("carregar dados", e);
+    }
+    setLoading(false);
+    render();
+  }
 })();
 </script>
 </body>
