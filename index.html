@@ -843,7 +843,8 @@
       recurring: !!r.recurring,
       recurGroup: r.recur_group || null,
       indefinite: !!r.indefinite,
-      paymentMethod: r.payment_method || null
+      paymentMethod: r.payment_method || null,
+      creditDueDate: r.credit_due_date || null
     };
   }
   function transactionToRow(t) {
@@ -855,8 +856,14 @@
       recurring: !!t.recurring,
       recur_group: t.recurGroup || null,
       indefinite: !!t.indefinite,
-      payment_method: t.paymentMethod || null
+      payment_method: t.paymentMethod || null,
+      credit_due_date: t.creditDueDate || null
     };
+  }
+  // Data que efetivamente afeta o saldo: para saída no crédito, é o vencimento da fatura;
+  // para todo o resto, é a própria data do lançamento.
+  function effectiveDate(t) {
+    return (t.type === "saida" && t.paymentMethod === "credito" && t.creditDueDate) ? t.creditDueDate : t.date;
   }
   function rowToReserveAdj(r) {
     return {
@@ -970,7 +977,8 @@
     for (var i = 0; i < state.transactions.length; i++) {
       var t = state.transactions[i];
       var delta = t.type === "entrada" ? t.value : -t.value;
-      byDate[t.date] = (byDate[t.date] || 0) + delta;
+      var key = effectiveDate(t);
+      byDate[key] = (byDate[key] || 0) + delta;
     }
     dailyDelta = byDate;
     sortedDates = Object.keys(byDate).sort();
@@ -1080,7 +1088,7 @@
     var entrada = 0, saidaPix = 0, saidaCredito = 0, economia = 0;
     for (var i = 0; i < state.transactions.length; i++) {
       var t = state.transactions[i];
-      var p = t.date.split("-").map(Number);
+      var p = effectiveDate(t).split("-").map(Number);
       if (p[0] === year && (p[1] - 1) === monthIdx) {
         if (t.type === "entrada") entrada += t.value;
         else if (t.type === "economia") economia += t.value;
@@ -1110,6 +1118,7 @@
           type: t.type,
           description: t.description,
           paymentMethod: t.paymentMethod,
+          creditDueDate: t.creditDueDate,
           value: t.value,
           isVirtual: false
         });
@@ -1175,7 +1184,9 @@
         ? ("recorrente · " + r.days + " dia" + (r.days > 1 ? "s" : ""))
         : formatShortDate(r.date);
       var descText = r.description ? escapeHtml(r.description) : "<span style='color:var(--muted)'>—</span>";
-      var pmText = r.paymentMethod === "credito" ? "Crédito" : r.paymentMethod === "pix" ? "Pix" : "—";
+      var pmText = r.paymentMethod === "credito"
+        ? ("Crédito" + (r.creditDueDate ? " · fatura " + formatShortDate(r.creditDueDate) : ""))
+        : r.paymentMethod === "pix" ? "Pix" : "—";
       var amtClass = r.type === "entrada" ? "entrada-amt" : r.type === "economia" ? "economia-amt" : "saida-amt";
       var rowClass = r.type === "diario" ? " class='diario-row'" : "";
       return "<tr" + rowClass + ">" +
@@ -1353,7 +1364,7 @@
           "<button data-action='cancel'>Cancelar</button>" +
           "</li>";
       }
-      var pmText = (t.type === "saida" && t.paymentMethod === "credito") ? " · crédito" : (t.type === "saida" && t.paymentMethod === "pix") ? " · pix" : "";
+      var pmText = (t.type === "saida" && t.paymentMethod === "credito") ? (" · crédito" + (t.creditDueDate ? " (vence " + formatShortDate(t.creditDueDate) + ")" : "")) : (t.type === "saida" && t.paymentMethod === "pix") ? " · pix" : "";
       var tagText = labelMap[t.type] + pmText + (t.recurring ? (t.indefinite ? " · recorrente (sem fim)" : " · recorrente") : "");
       var descHtml = t.description ? "<span class='mov-desc'>" + escapeHtml(t.description) + "</span>" : "";
       return "<li><div class='mov-info'><span class='tag " + t.type + "'>" + tagText + "</span>" + descHtml + "</div>" +
@@ -1486,7 +1497,7 @@
           var dim = daysInMonth(targetYear, normMonthIdx);
           var targetDay = Math.min(startDay, dim);
           var key = fmtKey(targetYear, normMonthIdx, targetDay);
-          if (paymentMethod === "credito") key = creditBillDate(key);
+          var dueDate = paymentMethod === "credito" ? creditBillDate(key) : null;
           rows.push(transactionToRow({
             type: originalType,
             value: Math.round(value * 100) / 100,
@@ -1495,7 +1506,8 @@
             recurring: isRecurringNew,
             recurGroup: newGroupId,
             paymentMethod: paymentMethod,
-            indefinite: isIndefinite
+            indefinite: isIndefinite,
+            creditDueDate: dueDate
           }));
         }
         var insRes = await sb.from("transactions").insert(rows);
@@ -1662,7 +1674,7 @@
         "<label><input type='radio' name='paymentMethod' value='pix' checked>Pix</label>" +
         "<label><input type='radio' name='paymentMethod' value='credito'>Crédito</label>" +
         "</div>" +
-        "<p class='edit-hint'>No crédito, entra na fatura do dia 14 (ou do mês seguinte, se já tiver passado do dia 14).</p>";
+        "<p class='edit-hint'>Fica registrado no dia da compra, mas só desconta do saldo na fatura do dia 14 (ou do mês seguinte, se a compra já tiver passado do dia 14).</p>";
     }
 
     actionsBox.innerHTML =
@@ -1742,7 +1754,7 @@
       var dim = daysInMonth(targetYear, normMonthIdx);
       var targetDay = Math.min(startDay, dim);
       var key = fmtKey(targetYear, normMonthIdx, targetDay);
-      if (paymentMethod === "credito") key = creditBillDate(key);
+      var dueDate = paymentMethod === "credito" ? creditBillDate(key) : null;
       rows.push(transactionToRow({
         type: type,
         value: Math.round(value * 100) / 100,
@@ -1751,7 +1763,8 @@
         recurring: isRecurring,
         recurGroup: isRecurring ? groupId : null,
         indefinite: isIndefinite,
-        paymentMethod: paymentMethod
+        paymentMethod: paymentMethod,
+        creditDueDate: dueDate
       }));
     }
 
