@@ -1250,7 +1250,7 @@
         if (t.type === "entrada" && t.date === key) {
           entrada += t.value;
         } else if (t.type === "saida" && t.paymentMethod === "credito") {
-          if (effectiveDate(t) === key) saidaCredito += t.value;
+          if (t.date === key) saidaCredito += t.value;
         } else if (t.type === "saida") {
           if (t.date === key) saidaPix += t.value;
         } else if (t.type === "diario" && t.date === key) {
