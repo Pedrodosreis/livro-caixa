@@ -705,9 +705,81 @@
   @media (prefers-reduced-motion: reduce) {
     .grid-slide, .overlay, .modal { animation: none !important; transition: none !important; }
   }
+
+  .login-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--paper);
+    padding: 20px;
+  }
+  .login-card {
+    width: 100%;
+    max-width: 320px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    text-align: center;
+  }
+  .login-card h1 {
+    font-family: 'Fraunces', Georgia, serif;
+    font-weight: 600;
+    font-size: 28px;
+    margin: 0;
+  }
+  .login-sub {
+    color: var(--muted);
+    font-size: 13px;
+    margin: 0 0 8px;
+  }
+  .login-card input {
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 11px 14px;
+    font-size: 15px;
+    font-family: inherit;
+    color: var(--ink);
+    background: var(--surface);
+    outline: none;
+  }
+  .login-card input:focus { border-color: var(--ink); }
+  .login-card button {
+    border: none;
+    background: var(--ink);
+    color: var(--paper);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    margin-top: 4px;
+  }
+  .login-card button:disabled { opacity: 0.6; cursor: default; }
+  .login-error {
+    color: var(--rust);
+    font-size: 12px;
+    margin: 0;
+  }
 </style>
 </head>
 <body>
+
+<div class="login-screen" id="loginScreen">
+  <div class="login-card">
+    <h1 class="serif">Livro-Caixa</h1>
+    <p class="login-sub">Acesso restrito — entre com seu e-mail e senha.</p>
+    <input type="email" id="loginEmail" placeholder="E-mail" autocomplete="username">
+    <input type="password" id="loginPassword" placeholder="Senha" autocomplete="current-password">
+    <button id="loginBtn">Entrar</button>
+    <p class="login-error" id="loginError" style="display:none;"></p>
+  </div>
+</div>
+
+<div id="appRoot" style="display:none;">
 
 <header>
   <div class="header-top">
@@ -766,6 +838,7 @@
     <button class="reset-btn" id="exportBtn">Exportar dados (.json)</button>
     <button class="reset-btn" id="importBtn">Importar dados</button>
     <button class="reset-btn" id="resetAllBtn">Zerar planilha</button>
+    <button class="reset-btn" id="logoutBtn">Sair</button>
   </div>
   <input type="file" id="importFileInput" accept="application/json,.json" style="display:none;">
 </main>
@@ -801,6 +874,8 @@
 
     <button class="close-modal" id="closeReserveModal">Fechar</button>
   </div>
+</div>
+
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
@@ -2263,7 +2338,71 @@
     reader.readAsText(file);
   });
 
-  init();
+  // ---- Autenticação ----
+  var loginScreen = document.getElementById("loginScreen");
+  var appRoot = document.getElementById("appRoot");
+  var loginEmail = document.getElementById("loginEmail");
+  var loginPassword = document.getElementById("loginPassword");
+  var loginBtn = document.getElementById("loginBtn");
+  var loginError = document.getElementById("loginError");
+
+  function showApp() {
+    loginScreen.style.display = "none";
+    appRoot.style.display = "";
+    init();
+  }
+  function showLogin(message) {
+    appRoot.style.display = "none";
+    loginScreen.style.display = "flex";
+    loginError.style.display = message ? "" : "none";
+    loginError.textContent = message || "";
+  }
+
+  async function doLogin() {
+    var email = loginEmail.value.trim();
+    var password = loginPassword.value;
+    if (!email || !password) {
+      loginError.textContent = "Preencha e-mail e senha.";
+      loginError.style.display = "";
+      return;
+    }
+    loginBtn.disabled = true;
+    loginBtn.textContent = "Entrando…";
+    var res = await sb.auth.signInWithPassword({ email: email, password: password });
+    loginBtn.disabled = false;
+    loginBtn.textContent = "Entrar";
+    if (res.error) {
+      loginError.textContent = "E-mail ou senha inválidos.";
+      loginError.style.display = "";
+      return;
+    }
+    loginPassword.value = "";
+    loginError.style.display = "none";
+    showApp();
+  }
+  loginBtn.addEventListener("click", doLogin);
+  loginPassword.addEventListener("keydown", function (e) { if (e.key === "Enter") doLogin(); });
+  loginEmail.addEventListener("keydown", function (e) { if (e.key === "Enter") doLogin(); });
+
+  document.getElementById("logoutBtn").addEventListener("click", async function () {
+    await sb.auth.signOut();
+    showLogin();
+  });
+
+  sb.auth.onAuthStateChange(function (event) {
+    if (event === "SIGNED_OUT") showLogin();
+  });
+
+  async function checkSession() {
+    var sessionRes = await sb.auth.getSession();
+    if (sessionRes.data && sessionRes.data.session) {
+      showApp();
+    } else {
+      showLogin();
+    }
+  }
+  checkSession();
+
   async function init() {
     setLoading(true);
     try {
