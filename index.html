@@ -706,6 +706,49 @@
     .grid-slide, .overlay, .modal { animation: none !important; transition: none !important; }
   }
 
+  :root { --blue: #3A6EA5; --blue-soft: #E0E9F3; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --blue: #7FB0E0; --blue-soft: #1E2E3F; }
+  }
+  :root[data-theme="dark"] { --blue: #7FB0E0; --blue-soft: #1E2E3F; }
+
+  .header-top { flex-wrap: wrap; }
+  .pills {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .vavr-pill {
+    background: var(--blue-soft);
+    border: 1px solid var(--blue);
+    border-radius: 10px;
+    padding: 8px 14px;
+    text-align: right;
+    min-width: 120px;
+    flex-shrink: 0;
+  }
+  .vavr-pill .label {
+    display: block;
+    font-size: 11px;
+    color: var(--blue);
+    font-weight: 500;
+    margin-bottom: 2px;
+  }
+  .vavr-pill .value {
+    display: block;
+    font-size: 17px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+  .vavr-pill .value.negative { color: var(--rust); }
+  td.cell .dot-vavr { background: var(--blue); }
+  .tag.vavr { background: var(--blue-soft); color: var(--blue); }
+  .action-btn.vavr .bar { background: var(--blue); }
+  .form-block.vavr .bar { background: var(--blue); }
+  .monthly-table td.vavr-amt { color: var(--blue); }
+
   .login-screen {
     position: fixed;
     inset: 0;
@@ -787,9 +830,15 @@
       <h1>Livro-Caixa</h1>
       <p>Seu saldo, dia a dia, sincronizado com seu banco de dados</p>
     </div>
-    <div class="reserve-pill" id="reservePill" role="button" tabindex="0">
-      <span class="label">Reserva de emergência</span>
-      <span class="value" id="reserveValue">R$ 0,00</span>
+    <div class="pills">
+      <div class="vavr-pill" id="vavrPill">
+        <span class="label">Saldo VA/VR</span>
+        <span class="value" id="vavrValue">R$ 0,00</span>
+      </div>
+      <div class="reserve-pill" id="reservePill" role="button" tabindex="0">
+        <span class="label">Reserva de emergência</span>
+        <span class="value" id="reserveValue">R$ 0,00</span>
+      </div>
     </div>
   </div>
   <p class="hint" id="loadingBanner" style="display:none; margin-top:10px;">Carregando dados do Supabase…</p>
@@ -835,6 +884,7 @@
   </div>
   <p class="hint" id="viewHint">Toque em um dia para lançar uma entrada, uma saída ou mover valor para a reserva.</p>
   <div class="data-actions">
+    <button class="reset-btn" id="cardSettingsBtn">Fechamento do cartão: dia 7</button>
     <button class="reset-btn" id="exportBtn">Exportar dados (.json)</button>
     <button class="reset-btn" id="importBtn">Importar dados</button>
     <button class="reset-btn" id="resetAllBtn">Zerar planilha</button>
@@ -876,6 +926,26 @@
   </div>
 </div>
 
+<div class="overlay" id="cardOverlay">
+  <div class="modal">
+    <p class="modal-date serif">Fechamento do cartão</p>
+    <p class="modal-balance">Compras no crédito feitas até esse dia entram na fatura que desconta do saldo nesse mesmo dia; as feitas depois vão para o mês seguinte.</p>
+    <div class="form-block">
+      <div class="months-row">
+        <label for="cardDayInput">Dia do fechamento</label>
+        <input type="number" id="cardDayInput" min="1" max="28" value="7">
+      </div>
+      <label class="indefinite-toggle"><input type="checkbox" id="cardRecalcCheck" checked>Recalcular também as compras no crédito já lançadas</label>
+      <p class="edit-hint" id="cardHint"></p>
+      <div class="form-actions">
+        <button class="save-btn" id="cardSaveBtn">Salvar</button>
+        <button class="cancel-btn" id="cardCancelBtn" aria-label="Cancelar">×</button>
+      </div>
+    </div>
+    <button class="close-modal" id="closeCardModal">Fechar</button>
+  </div>
+</div>
+
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
@@ -903,6 +973,8 @@
     diarios: []
   };
 
+  var cardClosingDay = 7; // dia do fechamento do cartão (configurável, 1–28)
+
   var sortedDates = [];
   var cumMap = {};
   var dailyDelta = {};
@@ -914,16 +986,18 @@
   }
 
   function rowToTransaction(r) {
+    // Compatibilidade: lançamentos criados antes como tipo "vavr" viram Entrada paga em VA/VR.
+    var legacyVavr = r.type === "vavr";
     return {
       id: String(r.id),
-      type: r.type,
+      type: legacyVavr ? "entrada" : r.type,
       value: Number(r.value),
       date: r.date,
       description: r.description || "",
       recurring: !!r.recurring,
       recurGroup: r.recur_group || null,
       indefinite: !!r.indefinite,
-      paymentMethod: r.payment_method || null,
+      paymentMethod: legacyVavr ? "vavr" : (r.payment_method || null),
       creditDueDate: r.credit_due_date || null
     };
   }
@@ -1039,8 +1113,8 @@
   function creditBillDate(dateKey) {
     var parts = dateKey.split("-").map(Number);
     var y = parts[0], mIdx = parts[1] - 1, day = parts[2];
-    if (day <= 14) return fmtKey(y, mIdx, 14);
-    return addMonthsToKey(fmtKey(y, mIdx, 14), 1);
+    if (day <= cardClosingDay) return fmtKey(y, mIdx, cardClosingDay);
+    return addMonthsToKey(fmtKey(y, mIdx, cardClosingDay), 1);
   }
 
   function currency(v) {
@@ -1123,6 +1197,19 @@
     return total;
   }
 
+  // Saldo do VA/VR: entradas recebidas em VA/VR menos saídas pagas com VA/VR, até a data informada.
+  // (Ambas também mexem no saldo total, porque o VA/VR faz parte dele.)
+  function vavrBalanceAsOf(dateStr) {
+    var total = 0;
+    for (var i = 0; i < state.transactions.length; i++) {
+      var t = state.transactions[i];
+      if (t.date > dateStr || t.paymentMethod !== "vavr") continue;
+      if (t.type === "entrada") total += t.value;
+      else if (t.type === "saida") total -= t.value;
+    }
+    return total;
+  }
+
   var TYPE_ORDER = ["entrada", "saida", "economia"];
 
   function dayTypesPresent(dateStr) {
@@ -1155,6 +1242,11 @@
     todayEl.textContent = currency(todayBal);
     todayEl.className = "value " + (todayBal > 0 ? "positive" : todayBal < 0 ? "negative" : "");
 
+    var vavrBal = vavrBalanceAsOf(todayStr);
+    var vavrEl = document.getElementById("vavrValue");
+    vavrEl.textContent = currency(vavrBal);
+    vavrEl.className = "value" + (vavrBal < 0 ? " negative" : "");
+
     if (currentView === "geral") {
       renderGrid();
     } else if (currentView === "mensal") {
@@ -1167,14 +1259,15 @@
   }
 
   function monthTotals(year, monthIdx) {
-    var entrada = 0, saidaPix = 0, saidaCredito = 0, economia = 0;
+    var entrada = 0, saidaPix = 0, saidaCredito = 0, saidaVavr = 0, economia = 0;
     for (var i = 0; i < state.transactions.length; i++) {
       var t = state.transactions[i];
       var p = effectiveDate(t).split("-").map(Number);
       if (p[0] === year && (p[1] - 1) === monthIdx) {
-        if (t.type === "entrada") entrada += t.value;
+        if (t.type === "entrada") entrada += t.value; // inclui as entradas em VA/VR
         else if (t.type === "economia") economia += t.value;
         else if (t.type === "saida" && t.paymentMethod === "credito") saidaCredito += t.value;
+        else if (t.type === "saida" && t.paymentMethod === "vavr") saidaVavr += t.value;
         else saidaPix += t.value; // saída no pix + diário (lançamentos manuais em dias passados)
       }
     }
@@ -1185,8 +1278,8 @@
         if (diarioAppliesOnDay(state.diarios[j], key)) saidaPix += state.diarios[j].value;
       }
     }
-    var saldo = entrada - saidaPix - saidaCredito - economia;
-    return { entrada: entrada, saidaPix: saidaPix, saidaCredito: saidaCredito, economia: economia, saldo: saldo };
+    var saldo = entrada - saidaPix - saidaCredito - saidaVavr - economia;
+    return { entrada: entrada, saidaPix: saidaPix, saidaCredito: saidaCredito, saidaVavr: saidaVavr, economia: economia, saldo: saldo };
   }
 
   function buildDetailRows(year, monthIdx) {
@@ -1244,12 +1337,13 @@
         "<td class='entrada-amt'>" + currency(tot.entrada) + "</td>" +
         "<td class='saida-amt'>" + currency(tot.saidaPix) + "</td>" +
         "<td class='saida-amt'>" + currency(tot.saidaCredito) + "</td>" +
+        "<td class='saida-amt'>" + currency(tot.saidaVavr) + "</td>" +
         "<td class='economia-amt'>" + currency(tot.economia) + "</td>" +
         "<td class='saldo " + saldoCls + "'>" + currency(tot.saldo) + "</td>" +
         "</tr>";
     }
     document.getElementById("monthlyTable").innerHTML =
-      "<thead><tr><th>Mês</th><th>Entradas</th><th>Saída (Pix)</th><th>Saída (Crédito)</th><th>Economia</th><th>Saldo do mês</th></tr></thead>" +
+      "<thead><tr><th>Mês</th><th>Entradas</th><th>Saída (Pix)</th><th>Saída (Crédito)</th><th>Saída (VA/VR)</th><th>Economia</th><th>Saldo do mês</th></tr></thead>" +
       "<tbody>" + rows + "</tbody>";
   }
 
@@ -1268,6 +1362,7 @@
       var descText = r.description ? escapeHtml(r.description) : "<span style='color:var(--muted)'>—</span>";
       var pmText = r.paymentMethod === "credito"
         ? ("Crédito" + (r.creditDueDate ? " · fatura " + formatShortDate(r.creditDueDate) : ""))
+        : r.paymentMethod === "vavr" ? "VA/VR"
         : r.paymentMethod === "pix" ? "Pix" : "—";
       var amtClass = r.type === "entrada" ? "entrada-amt" : r.type === "economia" ? "economia-amt" : "saida-amt";
       var rowClass = r.type === "diario" ? " class='diario-row'" : "";
@@ -1296,6 +1391,7 @@
       chip("Entradas", tot.entrada, "positive") +
       chip("Saídas (Pix)", tot.saidaPix, "negative") +
       chip("Saídas (Crédito)", tot.saidaCredito, "negative") +
+      chip("Saídas (VA/VR)", tot.saidaVavr, "negative") +
       chip("Economia", tot.economia, "gold") +
       chip("Saldo do mês", tot.saldo, saldoCls);
   }
@@ -1312,13 +1408,15 @@
     var rows = [];
     for (var day = 1; day <= dim; day++) {
       var key = fmtKey(year, monthIdx, day);
-      var entrada = 0, saidaPix = 0, saidaCredito = 0, diario = 0;
+      var entrada = 0, saidaPix = 0, saidaCredito = 0, saidaVavr = 0, diario = 0;
       for (var i = 0; i < state.transactions.length; i++) {
         var t = state.transactions[i];
         if (t.type === "entrada" && t.date === key) {
           entrada += t.value;
         } else if (t.type === "saida" && t.paymentMethod === "credito") {
           if (t.date === key) saidaCredito += t.value;
+        } else if (t.type === "saida" && t.paymentMethod === "vavr") {
+          if (t.date === key) saidaVavr += t.value;
         } else if (t.type === "saida") {
           if (t.date === key) saidaPix += t.value;
         } else if (t.type === "diario" && t.date === key) {
@@ -1334,6 +1432,7 @@
         entrada: entrada,
         saidaPix: saidaPix,
         saidaCredito: saidaCredito,
+        saidaVavr: saidaVavr,
         diario: diario,
         saldo: balanceAsOf(key)
       });
@@ -1362,16 +1461,18 @@
         moneyCell(r.entrada, "entrada-amt") +
         moneyCell(r.saidaPix, "saida-amt") +
         moneyCell(r.saidaCredito, "saida-amt") +
+        moneyCell(r.saidaVavr, "saida-amt") +
         moneyCell(r.diario, "saida-amt") +
         "<td class='" + saldoCls + "'>" + currency(r.saldo) + "</td>" +
         "</tr>";
     }).join("");
 
-    var totals = { entrada: 0, saidaPix: 0, saidaCredito: 0, diario: 0 };
+    var totals = { entrada: 0, saidaPix: 0, saidaCredito: 0, saidaVavr: 0, diario: 0 };
     for (var k = 0; k < cutoff; k++) {
       totals.entrada += rows[k].entrada;
       totals.saidaPix += rows[k].saidaPix;
       totals.saidaCredito += rows[k].saidaCredito;
+      totals.saidaVavr += rows[k].saidaVavr;
       totals.diario += rows[k].diario;
     }
     var footerSaldo = cutoff > 0 ? rows[cutoff - 1].saldo : 0;
@@ -1383,12 +1484,13 @@
       moneyCell(totals.entrada, "entrada-amt") +
       moneyCell(totals.saidaPix, "saida-amt") +
       moneyCell(totals.saidaCredito, "saida-amt") +
+      moneyCell(totals.saidaVavr, "saida-amt") +
       moneyCell(totals.diario, "saida-amt") +
       "<td class='" + footerSaldoCls + "'>" + currency(footerSaldo) + "</td>" +
       "</tr>";
 
     document.getElementById("consolidadoTable").innerHTML =
-      "<thead><tr><th>Dia</th><th>Entrada</th><th>Saída (Pix)</th><th>Cartão de crédito</th><th>Diário</th><th>Saldo</th></tr></thead>" +
+      "<thead><tr><th>Dia</th><th>Entrada</th><th>Saída (Pix)</th><th>Cartão de crédito</th><th>Saída (VA/VR)</th><th>Diário</th><th>Saldo</th></tr></thead>" +
       "<tbody>" + bodyHtml + footerHtml + "</tbody>";
   }
 
@@ -1507,12 +1609,13 @@
             "<label class='indefinite-toggle'><input type='checkbox' id='editIndefiniteCheck'" + (t.indefinite ? " checked" : "") + ">A perder de vista (repete até eu remover)</label>";
         }
         var paymentEditHtml = "";
-        if (t.type === "saida") {
-          var isCred = t.paymentMethod === "credito";
+        if (t.type === "entrada" || t.type === "saida") {
+          var curPm = t.paymentMethod === "credito" ? "credito" : t.paymentMethod === "vavr" ? "vavr" : "pix";
           paymentEditHtml =
             "<div class='payment-row'>" +
-            "<label><input type='radio' name='editPaymentMethod' value='pix'" + (isCred ? "" : " checked") + ">Pix</label>" +
-            "<label><input type='radio' name='editPaymentMethod' value='credito'" + (isCred ? " checked" : "") + ">Crédito</label>" +
+            "<label><input type='radio' name='editPaymentMethod' value='pix'" + (curPm === "pix" ? " checked" : "") + ">Pix</label>" +
+            (t.type === "saida" ? "<label><input type='radio' name='editPaymentMethod' value='credito'" + (curPm === "credito" ? " checked" : "") + ">Crédito</label>" : "") +
+            "<label><input type='radio' name='editPaymentMethod' value='vavr'" + (curPm === "vavr" ? " checked" : "") + ">VA/VR</label>" +
             "</div>";
         }
         var hintHtml = t.recurGroup ? "<p class='edit-hint'>Vale a partir deste mês; os meses anteriores continuam como estão.</p>" : "";
@@ -1538,7 +1641,7 @@
           "<button data-action='cancel'>Cancelar</button>" +
           "</li>";
       }
-      var pmText = (t.type === "saida" && t.paymentMethod === "credito") ? (" · crédito" + (t.creditDueDate ? " (vence " + formatShortDate(t.creditDueDate) + ")" : "")) : (t.type === "saida" && t.paymentMethod === "pix") ? " · pix" : "";
+      var pmText = (t.type === "saida" && t.paymentMethod === "credito") ? (" · crédito" + (t.creditDueDate ? " (vence " + formatShortDate(t.creditDueDate) + ")" : "")) : ((t.type === "entrada" || t.type === "saida") && t.paymentMethod === "vavr") ? " · va/vr" : ((t.type === "entrada" || t.type === "saida") && t.paymentMethod === "pix") ? " · pix" : "";
       var tagText = labelMap[t.type] + pmText + (t.recurring ? (t.indefinite ? " · recorrente (sem fim)" : " · recorrente") : "");
       var descHtml = t.description ? "<span class='mov-desc'>" + escapeHtml(t.description) + "</span>" : "";
       return "<li><div class='mov-info'><span class='tag " + t.type + "'>" + tagText + "</span>" + descHtml + "</div>" +
@@ -1645,7 +1748,7 @@
         var isRecurringNew = months > 1;
 
         var paymentMethod = null;
-        if (target.type === "saida") {
+        if (target.type === "entrada" || target.type === "saida") {
           var pmEditChecked = document.querySelector("input[name='editPaymentMethod']:checked");
           paymentMethod = pmEditChecked ? pmEditChecked.value : "pix";
         }
@@ -1842,13 +1945,14 @@
         "<label class='indefinite-toggle'><input type='checkbox' id='indefiniteCheck'>A perder de vista (repete até eu remover)</label>";
     }
     var paymentHtml = "";
-    if (type === "saida") {
+    if (type === "entrada" || type === "saida") {
       paymentHtml =
         "<div class='payment-row'>" +
         "<label><input type='radio' name='paymentMethod' value='pix' checked>Pix</label>" +
-        "<label><input type='radio' name='paymentMethod' value='credito'>Crédito</label>" +
+        (type === "saida" ? "<label><input type='radio' name='paymentMethod' value='credito'>Crédito</label>" : "") +
+        "<label><input type='radio' name='paymentMethod' value='vavr'>VA/VR</label>" +
         "</div>" +
-        "<p class='edit-hint'>Fica registrado no dia da compra, mas só desconta do saldo na fatura do dia 14 (ou do mês seguinte, se a compra já tiver passado do dia 14).</p>";
+        "<p class='edit-hint' id='pmHint'></p>";
     }
 
     actionsBox.innerHTML =
@@ -1870,6 +1974,22 @@
         var monthsRow = document.getElementById("monthsRow");
         monthsRow.style.display = this.checked ? "none" : "flex";
       });
+    }
+    if (type === "entrada" || type === "saida") {
+      var pmHints = type === "entrada" ? {
+        pix: "Entra no saldo total no próprio dia.",
+        vavr: "Entra no saldo total e também no saldo do VA/VR, no próprio dia."
+      } : {
+        pix: "Desconta do saldo no próprio dia.",
+        credito: "Fica registrado no dia da compra, mas só desconta do saldo na fatura do dia " + cardClosingDay + " (ou do mês seguinte, se a compra já tiver passado do dia " + cardClosingDay + ").",
+        vavr: "Desconta no próprio dia, do saldo total e também do saldo do VA/VR."
+      };
+      var pmHintEl = document.getElementById("pmHint");
+      var pmRadios = actionsBox.querySelectorAll("input[name='paymentMethod']");
+      pmHintEl.textContent = pmHints.pix;
+      for (var pr = 0; pr < pmRadios.length; pr++) {
+        pmRadios[pr].addEventListener("change", function () { pmHintEl.textContent = pmHints[this.value]; });
+      }
     }
     document.getElementById("cancelBtn").addEventListener("click", resetActions);
     document.getElementById("saveBtn").addEventListener("click", function () { submitForm(type); });
@@ -1911,7 +2031,7 @@
     var isRecurring = months > 1;
 
     var paymentMethod = null;
-    if (type === "saida") {
+    if (type === "entrada" || type === "saida") {
       var pmChecked = document.querySelector("input[name='paymentMethod']:checked");
       paymentMethod = pmChecked ? pmChecked.value : "pix";
     }
@@ -2338,6 +2458,133 @@
     reader.readAsText(file);
   });
 
+  // ---- Fechamento do cartão ----
+  var cardSettingsBtn = document.getElementById("cardSettingsBtn");
+  var cardOverlay = document.getElementById("cardOverlay");
+  var cardDayInput = document.getElementById("cardDayInput");
+  var cardRecalcCheck = document.getElementById("cardRecalcCheck");
+  var cardHint = document.getElementById("cardHint");
+  var settingsUserId = null;
+
+  function closingDayStorageKey() {
+    return "livrocaixa_closing_day_" + (settingsUserId || "local");
+  }
+  function updateCardBtn() {
+    cardSettingsBtn.textContent = "Fechamento do cartão: dia " + cardClosingDay;
+  }
+
+  async function loadSettings() {
+    try {
+      var sess = await sb.auth.getSession();
+      settingsUserId = sess && sess.data && sess.data.session && sess.data.session.user ? sess.data.session.user.id : null;
+    } catch (e) {}
+    try {
+      var local = parseInt(localStorage.getItem(closingDayStorageKey()), 10);
+      if (local >= 1 && local <= 28) cardClosingDay = local;
+    } catch (e) {}
+    try {
+      var res = await sb.from("user_settings").select("card_closing_day").maybeSingle();
+      if (!res.error && res.data && Number(res.data.card_closing_day) >= 1) {
+        cardClosingDay = Number(res.data.card_closing_day);
+      }
+    } catch (e) {}
+    updateCardBtn();
+  }
+
+  // Salva o dia no banco (vale em qualquer aparelho). Se a tabela ainda não existir, fica só neste navegador.
+  async function saveClosingDay(day) {
+    try { localStorage.setItem(closingDayStorageKey(), String(day)); } catch (e) {}
+    try {
+      var row = { card_closing_day: day };
+      if (settingsUserId) row.user_id = settingsUserId;
+      var res = await sb.from("user_settings").upsert(row, { onConflict: "user_id" });
+      return res.error || null;
+    } catch (e) {
+      return e;
+    }
+  }
+
+  // Recalcula a data de desconto das compras no crédito já lançadas, a partir da data da compra.
+  // Compras antigas (sem data de compra separada da fatura) não são mexidas.
+  async function recalcCreditDueDates() {
+    var rows = [], skippedLegacy = 0;
+    for (var i = 0; i < state.transactions.length; i++) {
+      var t = state.transactions[i];
+      if (t.type !== "saida" || t.paymentMethod !== "credito") continue;
+      if (!t.creditDueDate) { skippedLegacy++; continue; }
+      var nd = creditBillDate(t.date);
+      if (nd === t.creditDueDate) continue;
+      var row = transactionToRow(t);
+      row.id = Number(t.id);
+      row.credit_due_date = nd;
+      rows.push(row);
+    }
+    for (var c = 0; c < rows.length; c += 200) {
+      var res = await sb.from("transactions").upsert(rows.slice(c, c + 200), { onConflict: "id" });
+      if (res.error) return { error: res.error, updated: 0, skippedLegacy: skippedLegacy };
+    }
+    return { error: null, updated: rows.length, skippedLegacy: skippedLegacy };
+  }
+
+  function openCardModal() {
+    cardDayInput.value = cardClosingDay;
+    cardRecalcCheck.checked = true;
+    cardHint.textContent = "";
+    cardHint.style.color = "";
+    cardOverlay.classList.add("open");
+  }
+  function closeCardModal() {
+    cardOverlay.classList.remove("open");
+  }
+
+  cardSettingsBtn.addEventListener("click", openCardModal);
+  document.getElementById("closeCardModal").addEventListener("click", closeCardModal);
+  document.getElementById("cardCancelBtn").addEventListener("click", closeCardModal);
+  cardOverlay.addEventListener("click", function (e) { if (e.target === cardOverlay) closeCardModal(); });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && cardOverlay.classList.contains("open")) closeCardModal();
+  });
+
+  document.getElementById("cardSaveBtn").addEventListener("click", async function () {
+    var day = parseInt(cardDayInput.value, 10);
+    if (!day || day < 1 || day > 28) {
+      cardHint.style.color = "var(--rust)";
+      cardHint.textContent = "Informe um dia entre 1 e 28.";
+      return;
+    }
+    var saveBtn = this;
+    saveBtn.disabled = true;
+    var notes = [];
+    cardClosingDay = day;
+    updateCardBtn();
+
+    var saveErr = await saveClosingDay(day);
+    if (saveErr) {
+      console.error("salvar fechamento do cartão", saveErr);
+      notes.push("O dia foi salvo só neste navegador: crie a tabela user_settings no Supabase para ele valer em todos os aparelhos.");
+    }
+
+    if (cardRecalcCheck.checked) {
+      var rec = await recalcCreditDueDates();
+      if (rec.error) {
+        console.error("recalcular faturas", rec.error);
+        notes.push("Não consegui recalcular as compras já lançadas: " + (rec.error.message || "erro ao falar com o Supabase") + ".");
+      } else if (rec.skippedLegacy > 0) {
+        notes.push(rec.skippedLegacy + " compra(s) antiga(s) no crédito, lançadas antes do ajuste da fatura, não foram alteradas (só guardam a data da fatura).");
+      }
+      try { await loadFromDB(); } catch (e) { dbError("recarregar dados", e); }
+    }
+    render();
+    saveBtn.disabled = false;
+
+    if (notes.length) {
+      cardHint.style.color = "var(--rust)";
+      cardHint.textContent = notes.join(" ");
+    } else {
+      closeCardModal();
+    }
+  });
+
   // ---- Autenticação ----
   var loginScreen = document.getElementById("loginScreen");
   var appRoot = document.getElementById("appRoot");
@@ -2405,6 +2652,7 @@
 
   async function init() {
     setLoading(true);
+    await loadSettings();
     try {
       await loadFromDB();
     } catch (e) {
